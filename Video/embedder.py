@@ -2,7 +2,7 @@ import json
 import os
 import google.generativeai as genai
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
+from qdrant_client.models import Distance, VectorParams, PointStruct, PayloadSchemaType
 from dotenv import load_dotenv
 import time
 
@@ -96,7 +96,7 @@ def create_embeddings(texts, batch_size=100):
 
 def setup_qdrant_collection(client, collection_name, vector_size=768):
     """
-    Create or recreate Qdrant collection.
+    Create or recreate Qdrant collection with payload indexes.
     """
     try:
         # Delete if exists
@@ -111,6 +111,25 @@ def setup_qdrant_collection(client, collection_name, vector_size=768):
         vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE)
     )
     print(f"✓ Created collection: {collection_name}")
+    
+    # Create indexes for filtering
+    print(f"✓ Creating payload indexes...")
+    client.create_payload_index(
+        collection_name=collection_name,
+        field_name="course_id",
+        field_schema=PayloadSchemaType.INTEGER
+    )
+    client.create_payload_index(
+        collection_name=collection_name,
+        field_name="module_id",
+        field_schema=PayloadSchemaType.INTEGER
+    )
+    client.create_payload_index(
+        collection_name=collection_name,
+        field_name="resource_id",
+        field_schema=PayloadSchemaType.INTEGER
+    )
+    print(f"✓ Created indexes for course_id, module_id, resource_id")
 
 
 def process_and_upload_data(data_file="course_data.json"):
