@@ -3,6 +3,7 @@ import os
 import psycopg2
 import psycopg2.extras
 import google.generativeai as genai
+from pydantic.types import NonNegativeInt
 from qdrant_client import QdrantClient
 from qdrant_client.models import Filter, FieldCondition, MatchValue, PointStruct, PayloadSchemaType
 from dotenv import load_dotenv
@@ -15,22 +16,27 @@ load_dotenv()
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
 # ============================================
-# CONFIGURE RESOURCE DETAILS HERE
+# CONFIGURE UPDATE SCOPE HERE
 # ============================================
-COURSE_ID = 329
-MODULE_ID = 575  # Set to None to get all modules in course
-RESOURCE_ID = 1564  # Set to None to get all resources in module
+COURSE_ID = 329          # Required: Must specify course_id
+MODULE_ID = None         # Optional: None = all modules in course
+RESOURCE_ID = None    # Optional: None = all resources in module
 # ============================================
 
 
-def fetch_resource_data(course_id, module_id, resource_id):
+def fetch_data(course_id, module_id=None, resource_id=None):
     """
-    Fetch data for a specific resource from PostgreSQL.
+    Fetch data from PostgreSQL based on specified scope.
+    
+    Scope Logic:
+    - course_id only: All resources in that course
+    - course_id + module_id: All resources in that module
+    - course_id + module_id + resource_id: Single resource
     """
     print(f"\n📥 Fetching data for:")
     print(f"   Course ID   : {course_id}")
-    print(f"   Module ID   : {module_id}")
-    print(f"   Resource ID : {resource_id}")
+    print(f"   Module ID   : {module_id if module_id is not None else 'ALL'}")
+    print(f"   Resource ID : {resource_id if resource_id is not None else 'ALL'}")
     
     conn = psycopg2.connect(
         host=os.getenv("POSTGRES_HOST"),
@@ -42,6 +48,7 @@ def fetch_resource_data(course_id, module_id, resource_id):
 
     cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
+    # Build query based on provided parameters
     query = f"""
         SELECT
             m.course_id AS course_id,
@@ -53,67 +60,75 @@ def fetch_resource_data(course_id, module_id, resource_id):
         JOIN course.t_resource r 
         ON m.id = r.module_id 
         WHERE m.course_id = {course_id}
-        AND r.module_id = {module_id}
-        AND r.id = {resource_id}
     """
+    
+    if module_id is not None:
+        query += f" AND r.module_id = {module_id}"
+    
+    if resource_id is not None:
+        query += f" AND r.id = {resource_id}"
 
     cursor.execute(query)
-    row = cursor.fetchone()
+    rows = cursor.fetchall()
 
     cursor.close()
     conn.close()
     
-    if row:
-        print(f"✓ Successfully fetched resource data")
+    if rows:
+        print(f"✓ Successfully fetched {len(rows)} resource(s)")
     else:
-        print(f"✗ No data found for the specified resource")
+        print(f"✗ No data found for the specified criteria")
     
-    return row
+    return rows
 
 
-def transform_resource_data(row):
+def transform_data(rows):
     """
-    Transform and clean resource data.
+    Transform and clean data.
     """
-    if not row:
-        return None
+    if not rows:
+        return []
     
     print(f"\n🔄 Transforming data...")
     
-    new_row = dict(row)
+    transformed = []
 
-    summary = new_row.get("summary")
-    chapters = new_row.get("chapters")
+    for row in rows:
+        new_row = dict(row)
 
-    # Parse summary if it's a string
-    if isinstance(summary, str):
-        try:
-            summary = json.loads(summary)
-        except Exception:
-            summary = None
+        summary = new_row.get("summary")
+        chapters = new_row.get("chapters")
 
-    # Extract summary content
-    if isinstance(summary, dict) and "content" in summary:
-        new_row["summary"] = summary["content"]
-    else:
-        new_row["summary"] = None
+        # Parse summary if it's a string
+        if isinstance(summary, str):
+            try:
+                summary = json.loads(summary)
+            except Exception:
+                summary = None
 
-    # Parse chapters if it's a string
-    if isinstance(chapters, str):
-        try:
-            chapters = json.loads(chapters)
-        except Exception:
-            chapters = None
+        # Extract summary content
+        if isinstance(summary, dict) and "content" in summary:
+            new_row["summary"] = summary["content"]
+        else:
+            new_row["summary"] = None
 
-    new_row["chapters"] = chapters
+        # Parse chapters if it's a string
+        if isinstance(chapters, str):
+            try:
+                chapters = json.loads(chapters)
+            except Exception:
+                chapters = None
 
-    # Check if both summary and chapters are null/empty
-    if not new_row["summary"] and not new_row["chapters"]:
-        print(f"⚠️  Warning: Resource has no valid summary or chapters")
-        return None
+        new_row["chapters"] = chapters
 
-    print(f"✓ Transformation complete")
-    return new_row
+        # Skip if both summary and chapters are null/empty
+        if not new_row["summary"] and not new_row["chapters"]:
+            continue
+
+        transformed.append(new_row)
+
+    print(f"✓ Transformed {len(transformed)} valid resource(s)")
+    return transformed
 
 
 def ensure_indexes_exist(client, collection_name):
@@ -141,46 +156,55 @@ def ensure_indexes_exist(client, collection_name):
             print(f"  ℹ️  Index for {field_name} already exists")
 
 
-def delete_resource_vectors(client, collection_name, course_id, module_id, resource_id):
+def delete_vectors(client, collection_name, course_id, module_id=None, resource_id=None):
     """
-    Delete all vectors related to a specific resource from Qdrant.
-    Uses the unique combination of course_id, module_id, and resource_id.
+    Delete vectors based on specified scope.
+    
+    Scope Logic:
+    - course_id only: Delete all vectors for that course
+    - course_id + module_id: Delete all vectors for that module
+    - course_id + module_id + resource_id: Delete vectors for that resource
     """
     print(f"\n🗑️  Deleting existing vectors for:")
     print(f"   Course ID   : {course_id}")
-    print(f"   Module ID   : {module_id}")
-    print(f"   Resource ID : {resource_id}")
+    print(f"   Module ID   : {module_id if module_id is not None else 'ALL'}")
+    print(f"   Resource ID : {resource_id if resource_id is not None else 'ALL'}")
     
     try:
+        # Build filter conditions
+        filter_conditions = [
+            FieldCondition(key="course_id", match=MatchValue(value=course_id))
+        ]
+        
+        if module_id is not None:
+            filter_conditions.append(
+                FieldCondition(key="module_id", match=MatchValue(value=module_id))
+            )
+        
+        if resource_id is not None:
+            filter_conditions.append(
+                FieldCondition(key="resource_id", match=MatchValue(value=resource_id))
+            )
+        
+        delete_filter = Filter(must=filter_conditions)
+        
         # Count points before deletion
         count_result = client.count(
             collection_name=collection_name,
-            count_filter=Filter(
-                must=[
-                    FieldCondition(key="course_id", match=MatchValue(value=course_id)),
-                    FieldCondition(key="module_id", match=MatchValue(value=module_id)),
-                    FieldCondition(key="resource_id", match=MatchValue(value=resource_id))
-                ]
-            )
+            count_filter=delete_filter
         )
         
         points_count = count_result.count
         print(f"   Found {points_count} existing chunks to delete")
         
         if points_count == 0:
-            print(f"   No existing vectors found for this resource")
+            print(f"   No existing vectors found for this scope")
             return
         
-        # Delete points with matching course_id, module_id, and resource_id
+        # Delete points
         client.delete(
             collection_name=collection_name,
-            points_selector=Filter(
-                must=[
-                    FieldCondition(key="course_id", match=MatchValue(value=course_id)),
-                    FieldCondition(key="module_id", match=MatchValue(value=module_id)),
-                    FieldCondition(key="resource_id", match=MatchValue(value=resource_id))
-                ]
-            )
+            points_selector=delete_filter
         )
         print(f"✓ Successfully deleted {points_count} vectors")
         
@@ -290,83 +314,85 @@ def get_next_point_id(client, collection_name):
         return 0
 
 
-def upload_resource_data(resource_data, client, collection_name):
+def upload_data(data, client, collection_name):
     """
-    Process resource data and upload to Qdrant.
+    Process data and upload to Qdrant.
     """
-    if not resource_data:
+    if not data:
         print("\n⚠️  No data to upload")
         return
     
-    course_id = resource_data.get("course_id")
-    module_id = resource_data.get("module_id")
-    resource_id = resource_data.get("resource_id")
-    summary = resource_data.get("summary")
-    chapters = resource_data.get("chapters")
-    
-    print(f"\n📤 Processing resource data...")
+    print(f"\n📤 Uploading data...")
     
     # Get next available point ID
     point_id = get_next_point_id(client, collection_name)
     print(f"✓ Starting from point ID: {point_id}")
     
-    chunks_to_embed = []
-    chunk_metadata = []
+    # Process each resource
+    all_points = []
     
-    # Process summary chunk
-    if summary:
-        chunks_to_embed.append(summary)
-        chunk_metadata.append({
-            "course_id": course_id,
-            "module_id": module_id,
-            "resource_id": resource_id,
-            "chunk_id": f"{course_id}_{module_id}_{resource_id}_0",
-            "chunk_type": "summary",
-            "chunk_index": 0,
-            "text": summary
-        })
-        print(f"  + Summary chunk")
-    
-    # Process chapter chunks
-    if chapters:
-        chapter_chunks = process_chapters(chapters)
+    for resource in data:
+        course_id = resource.get("course_id")
+        module_id = resource.get("module_id")
+        resource_id = resource.get("resource_id")
+        summary = resource.get("summary")
+        chapters = resource.get("chapters")
         
-        for idx, chunk_data in enumerate(chapter_chunks, start=1):
-            chunks_to_embed.append(chunk_data["text"])
+        print(f"\n  Processing resource {resource_id} (course: {course_id}, module: {module_id})")
+        
+        chunks_to_embed = []
+        chunk_metadata = []
+        
+        # Process summary chunk
+        if summary:
+            chunks_to_embed.append(summary)
             chunk_metadata.append({
                 "course_id": course_id,
                 "module_id": module_id,
                 "resource_id": resource_id,
-                "chunk_id": f"{course_id}_{module_id}_{resource_id}_{idx}",
-                "chunk_type": "chapter",
-                "chunk_index": idx,
-                "topic_title": chunk_data["topic_title"],
-                "subtopic_title": chunk_data["subtopic_title"],
-                "text": chunk_data["text"]
+                "chunk_id": f"{course_id}_{module_id}_{resource_id}_0",
+                "chunk_type": "summary",
+                "chunk_index": 0,
+                "text": summary
             })
+            print(f"    + Summary chunk")
         
-        print(f"  + {len(chapter_chunks)} chapter chunks")
-    
-    # Generate embeddings
-    if not chunks_to_embed:
-        print("\n⚠️  No chunks to embed!")
-        return
-    
-    print(f"\n  Generating {len(chunks_to_embed)} embeddings...")
-    embeddings = create_embeddings(chunks_to_embed)
-    
-    # Create points
-    all_points = []
-    for embedding, metadata in zip(embeddings, chunk_metadata):
-        if embedding is not None:
-            all_points.append(
-                PointStruct(
-                    id=point_id,
-                    vector=embedding,
-                    payload=metadata
-                )
-            )
-            point_id += 1
+        # Process chapter chunks
+        if chapters:
+            chapter_chunks = process_chapters(chapters)
+            
+            for idx, chunk_data in enumerate(chapter_chunks, start=1):
+                chunks_to_embed.append(chunk_data["text"])
+                chunk_metadata.append({
+                    "course_id": course_id,
+                    "module_id": module_id,
+                    "resource_id": resource_id,
+                    "chunk_id": f"{course_id}_{module_id}_{resource_id}_{idx}",
+                    "chunk_type": "chapter",
+                    "chunk_index": idx,
+                    "topic_title": chunk_data["topic_title"],
+                    "subtopic_title": chunk_data["subtopic_title"],
+                    "text": chunk_data["text"]
+                })
+            
+            print(f"    + {len(chapter_chunks)} chapter chunks")
+        
+        # Generate embeddings
+        if chunks_to_embed:
+            print(f"    Generating {len(chunks_to_embed)} embeddings...")
+            embeddings = create_embeddings(chunks_to_embed)
+            
+            # Create points
+            for embedding, metadata in zip(embeddings, chunk_metadata):
+                if embedding is not None:
+                    all_points.append(
+                        PointStruct(
+                            id=point_id,
+                            vector=embedding,
+                            payload=metadata
+                        )
+                    )
+                    point_id += 1
     
     # Upload to Qdrant
     if all_points:
@@ -388,15 +414,33 @@ def upload_resource_data(resource_data, client, collection_name):
 
 def main():
     """
-    Main function to update a specific resource in Qdrant.
+    Main function to update Qdrant based on specified scope.
     """
     print("=" * 70)
-    print("RESOURCE UPDATER - Incremental Qdrant Update")
+    print("RESOURCE UPDATER - Flexible Incremental Update")
     print("=" * 70)
-    print(f"\n🎯 Target Resource:")
+    
+    # Validate COURSE_ID
+    if COURSE_ID is None:
+        print("\n❌ Error: COURSE_ID is required!")
+        print("Please set COURSE_ID at the top of the file.")
+        return
+    
+    # Display update scope
+    print(f"\n🎯 Update Scope:")
     print(f"   Course ID   : {COURSE_ID}")
-    print(f"   Module ID   : {MODULE_ID}")
-    print(f"   Resource ID : {RESOURCE_ID}")
+    print(f"   Module ID   : {MODULE_ID if MODULE_ID is not None else 'ALL'}")
+    print(f"   Resource ID : {RESOURCE_ID if RESOURCE_ID is not None else 'ALL'}")
+    
+    # Determine scope description
+    if MODULE_ID is None and RESOURCE_ID is None:
+        scope = f"entire course {COURSE_ID}"
+    elif RESOURCE_ID is None:
+        scope = f"all resources in module {MODULE_ID}"
+    else:
+        scope = f"resource {RESOURCE_ID}"
+    
+    print(f"\n📋 This will update: {scope}")
     
     # Initialize Qdrant client
     client = QdrantClient(
@@ -408,36 +452,37 @@ def main():
     # Ensure indexes exist
     ensure_indexes_exist(client, collection_name)
     
-    # Step 1: Delete existing resource vectors
-    delete_resource_vectors(client, collection_name, COURSE_ID, MODULE_ID, RESOURCE_ID)
+    # Step 1: Delete existing vectors
+    delete_vectors(client, collection_name, COURSE_ID, MODULE_ID, RESOURCE_ID)
     
     # Step 2: Fetch fresh data from PostgreSQL
-    row = fetch_resource_data(COURSE_ID, MODULE_ID, RESOURCE_ID)
+    rows = fetch_data(COURSE_ID, MODULE_ID, RESOURCE_ID)
     
-    if not row:
-        print(f"\n⚠️  No data found for the specified resource")
+    if not rows:
+        print(f"\n⚠️  No data found for the specified criteria")
         print("Exiting...")
         return
     
     # Step 3: Transform data
-    resource_data = transform_resource_data(row)
+    transformed_data = transform_data(rows)
     
-    if not resource_data:
-        print(f"\n⚠️  No valid data to upload for the specified resource")
+    if not transformed_data:
+        print(f"\n⚠️  No valid data to upload")
         print("Exiting...")
         return
     
     # Step 4: Upload to Qdrant
-    upload_resource_data(resource_data, client, collection_name)
+    upload_data(transformed_data, client, collection_name)
     
     # Summary
     print("\n" + "=" * 70)
-    print(f"✅ RESOURCE UPDATE COMPLETED")
+    print(f"✅ UPDATE COMPLETED")
     print("=" * 70)
-    print(f"\nUpdated Resource:")
+    print(f"\nUpdated Scope:")
     print(f"   Course ID   : {COURSE_ID}")
-    print(f"   Module ID   : {MODULE_ID}")
-    print(f"   Resource ID : {RESOURCE_ID}")
+    print(f"   Module ID   : {MODULE_ID if MODULE_ID is not None else 'ALL'}")
+    print(f"   Resource ID : {RESOURCE_ID if RESOURCE_ID is not None else 'ALL'}")
+    print(f"   Description : {scope}")
     
     # Show collection stats
     collection_info = client.get_collection(collection_name)

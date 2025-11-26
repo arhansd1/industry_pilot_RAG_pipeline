@@ -10,8 +10,8 @@ load_dotenv()
 # CONFIGURE SEARCH CRITERIA HERE
 # ============================================
 COURSE_ID = 329
-MODULE_ID = 575  # Set to None to get all modules in course
-RESOURCE_ID = 1564  # Set to None to get all resources in module
+MODULE_ID = None  # Set to None to get all modules in course
+RESOURCE_ID = None  # Set to None to get all resources in module
 # ============================================
 
 
