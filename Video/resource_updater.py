@@ -450,6 +450,38 @@ def update_resource(course_id, module_id=None, resource_id=None):
     print(f"\n📋 This will update: {scope}")
     
     try:
+        # Step 1: Fetch data from PostgreSQL FIRST
+        rows = fetch_data(course_id, module_id, resource_id)
+        
+        if not rows:
+            print(f"\n⚠️  No data found in PostgreSQL for the specified criteria")
+            print(f"❌ Process stopped - cannot proceed without data")
+            return {
+                "success": False,
+                "message": "No data found in PostgreSQL",
+                "reason": "PostgreSQL query returned no results",
+                "course_id": course_id,
+                "module_id": module_id,
+                "resource_id": resource_id
+            }
+        
+        # Step 2: Transform data
+        transformed_data = transform_data(rows)
+        
+        if not transformed_data:
+            print(f"\n⚠️  No valid data after transformation")
+            print(f"❌ Process stopped - all fetched data is invalid or empty")
+            return {
+                "success": False,
+                "message": "No valid data after transformation",
+                "reason": "All resources have empty summary and chapters",
+                "course_id": course_id,
+                "module_id": module_id,
+                "resource_id": resource_id
+            }
+        
+        print(f"\n✓ Data validation passed - proceeding with update")
+        
         # Initialize Qdrant client
         client = QdrantClient(
             url=os.getenv("QDRANT_URL"),
@@ -457,39 +489,13 @@ def update_resource(course_id, module_id=None, resource_id=None):
         )
         collection_name = os.getenv("QDRANT_COLLECTION_NAME_VIDEO")
         
-        # Ensure indexes exist
+        # Step 3: Ensure indexes exist
         ensure_indexes_exist(client, collection_name)
         
-        # Step 1: Delete existing vectors
+        # Step 4: Delete existing vectors (now safe since we have valid data)
         delete_vectors(client, collection_name, course_id, module_id, resource_id)
         
-        # Step 2: Fetch fresh data from PostgreSQL
-        rows = fetch_data(course_id, module_id, resource_id)
-        
-        if not rows:
-            print(f"\n⚠️  No data found for the specified criteria")
-            return {
-                "success": False,
-                "message": "No data found",
-                "course_id": course_id,
-                "module_id": module_id,
-                "resource_id": resource_id
-            }
-        
-        # Step 3: Transform data
-        transformed_data = transform_data(rows)
-        
-        if not transformed_data:
-            print(f"\n⚠️  No valid data to upload")
-            return {
-                "success": False,
-                "message": "No valid data to upload",
-                "course_id": course_id,
-                "module_id": module_id,
-                "resource_id": resource_id
-            }
-        
-        # Step 4: Upload to Qdrant
+        # Step 5: Upload to Qdrant
         upload_data(transformed_data, client, collection_name)
         
         # Get collection info
@@ -524,6 +530,7 @@ def update_resource(course_id, module_id=None, resource_id=None):
         return {
             "success": False,
             "message": str(e),
+            "reason": "Exception occurred during execution",
             "course_id": course_id,
             "module_id": module_id,
             "resource_id": resource_id
