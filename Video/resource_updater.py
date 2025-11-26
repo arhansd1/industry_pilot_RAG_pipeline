@@ -3,7 +3,6 @@ import os
 import psycopg2
 import psycopg2.extras
 import google.generativeai as genai
-from pydantic.types import NonNegativeInt
 from qdrant_client import QdrantClient
 from qdrant_client.models import Filter, FieldCondition, MatchValue, PointStruct, PayloadSchemaType
 from dotenv import load_dotenv
@@ -14,14 +13,6 @@ load_dotenv()
 
 # Configure Google Generative AI
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-
-# ============================================
-# CONFIGURE UPDATE SCOPE HERE
-# ============================================
-COURSE_ID = 329          # Required: Must specify course_id
-MODULE_ID = None         # Optional: None = all modules in course
-RESOURCE_ID = None    # Optional: None = all resources in module
-# ============================================
 
 
 def fetch_data(course_id, module_id=None, resource_id=None):
@@ -412,83 +403,143 @@ def upload_data(data, client, collection_name):
         print("\n⚠️  No vectors to upload!")
 
 
-def main():
+def update_resource(course_id, module_id=None, resource_id=None):
     """
     Main function to update Qdrant based on specified scope.
+    
+    Args:
+        course_id (int): Required - Course ID to update
+        module_id (int, optional): Module ID to update. None = all modules in course
+        resource_id (int, optional): Resource ID to update. None = all resources in module/course
+    
+    Returns:
+        dict: Summary of the update operation
+    
+    Example Usage:
+        # Update entire course
+        update_resource(course_id=329)
+        
+        # Update all resources in a module
+        update_resource(course_id=329, module_id=575)
+        
+        # Update specific resource
+        update_resource(course_id=329, module_id=575, resource_id=1564)
     """
     print("=" * 70)
     print("RESOURCE UPDATER - Flexible Incremental Update")
     print("=" * 70)
     
     # Validate COURSE_ID
-    if COURSE_ID is None:
-        print("\n❌ Error: COURSE_ID is required!")
-        print("Please set COURSE_ID at the top of the file.")
-        return
+    if course_id is None:
+        raise ValueError("course_id is required!")
     
     # Display update scope
     print(f"\n🎯 Update Scope:")
-    print(f"   Course ID   : {COURSE_ID}")
-    print(f"   Module ID   : {MODULE_ID if MODULE_ID is not None else 'ALL'}")
-    print(f"   Resource ID : {RESOURCE_ID if RESOURCE_ID is not None else 'ALL'}")
+    print(f"   Course ID   : {course_id}")
+    print(f"   Module ID   : {module_id if module_id is not None else 'ALL'}")
+    print(f"   Resource ID : {resource_id if resource_id is not None else 'ALL'}")
     
     # Determine scope description
-    if MODULE_ID is None and RESOURCE_ID is None:
-        scope = f"entire course {COURSE_ID}"
-    elif RESOURCE_ID is None:
-        scope = f"all resources in module {MODULE_ID}"
+    if module_id is None and resource_id is None:
+        scope = f"entire course {course_id}"
+    elif resource_id is None:
+        scope = f"all resources in module {module_id}"
     else:
-        scope = f"resource {RESOURCE_ID}"
+        scope = f"resource {resource_id}"
     
     print(f"\n📋 This will update: {scope}")
     
-    # Initialize Qdrant client
-    client = QdrantClient(
-        url=os.getenv("QDRANT_URL"),
-        api_key=os.getenv("QDRANT_API_KEY")
-    )
-    collection_name = os.getenv("QDRANT_COLLECTION_NAME_VIDEO")
-    
-    # Ensure indexes exist
-    ensure_indexes_exist(client, collection_name)
-    
-    # Step 1: Delete existing vectors
-    delete_vectors(client, collection_name, COURSE_ID, MODULE_ID, RESOURCE_ID)
-    
-    # Step 2: Fetch fresh data from PostgreSQL
-    rows = fetch_data(COURSE_ID, MODULE_ID, RESOURCE_ID)
-    
-    if not rows:
-        print(f"\n⚠️  No data found for the specified criteria")
-        print("Exiting...")
-        return
-    
-    # Step 3: Transform data
-    transformed_data = transform_data(rows)
-    
-    if not transformed_data:
-        print(f"\n⚠️  No valid data to upload")
-        print("Exiting...")
-        return
-    
-    # Step 4: Upload to Qdrant
-    upload_data(transformed_data, client, collection_name)
-    
-    # Summary
-    print("\n" + "=" * 70)
-    print(f"✅ UPDATE COMPLETED")
-    print("=" * 70)
-    print(f"\nUpdated Scope:")
-    print(f"   Course ID   : {COURSE_ID}")
-    print(f"   Module ID   : {MODULE_ID if MODULE_ID is not None else 'ALL'}")
-    print(f"   Resource ID : {RESOURCE_ID if RESOURCE_ID is not None else 'ALL'}")
-    print(f"   Description : {scope}")
-    
-    # Show collection stats
-    collection_info = client.get_collection(collection_name)
-    print(f"\nCollection Info:")
-    print(f"  Total vectors: {collection_info.points_count}")
+    try:
+        # Initialize Qdrant client
+        client = QdrantClient(
+            url=os.getenv("QDRANT_URL"),
+            api_key=os.getenv("QDRANT_API_KEY")
+        )
+        collection_name = os.getenv("QDRANT_COLLECTION_NAME_VIDEO")
+        
+        # Ensure indexes exist
+        ensure_indexes_exist(client, collection_name)
+        
+        # Step 1: Delete existing vectors
+        delete_vectors(client, collection_name, course_id, module_id, resource_id)
+        
+        # Step 2: Fetch fresh data from PostgreSQL
+        rows = fetch_data(course_id, module_id, resource_id)
+        
+        if not rows:
+            print(f"\n⚠️  No data found for the specified criteria")
+            return {
+                "success": False,
+                "message": "No data found",
+                "course_id": course_id,
+                "module_id": module_id,
+                "resource_id": resource_id
+            }
+        
+        # Step 3: Transform data
+        transformed_data = transform_data(rows)
+        
+        if not transformed_data:
+            print(f"\n⚠️  No valid data to upload")
+            return {
+                "success": False,
+                "message": "No valid data to upload",
+                "course_id": course_id,
+                "module_id": module_id,
+                "resource_id": resource_id
+            }
+        
+        # Step 4: Upload to Qdrant
+        upload_data(transformed_data, client, collection_name)
+        
+        # Get collection info
+        collection_info = client.get_collection(collection_name)
+        
+        # Summary
+        print("\n" + "=" * 70)
+        print(f"✅ UPDATE COMPLETED")
+        print("=" * 70)
+        print(f"\nUpdated Scope:")
+        print(f"   Course ID   : {course_id}")
+        print(f"   Module ID   : {module_id if module_id is not None else 'ALL'}")
+        print(f"   Resource ID : {resource_id if resource_id is not None else 'ALL'}")
+        print(f"   Description : {scope}")
+        print(f"\nCollection Info:")
+        print(f"  Total vectors: {collection_info.points_count}")
+        
+        return {
+            "success": True,
+            "message": f"Successfully updated {scope}",
+            "course_id": course_id,
+            "module_id": module_id,
+            "resource_id": resource_id,
+            "resources_processed": len(transformed_data),
+            "total_vectors": collection_info.points_count
+        }
+        
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "success": False,
+            "message": str(e),
+            "course_id": course_id,
+            "module_id": module_id,
+            "resource_id": resource_id
+        }
 
 
+# For backwards compatibility - can still run as standalone script
 if __name__ == "__main__":
-    main()
+    # Configure these when running as standalone script
+    COURSE_ID = 329          # Required: Must specify course_id
+    MODULE_ID = 575          # Optional: None = all modules in course
+    RESOURCE_ID = 1564       # Optional: None = all resources in module
+    
+    result = update_resource(COURSE_ID, MODULE_ID, RESOURCE_ID)
+    
+    if result["success"]:
+        print("\n✅ Script completed successfully!")
+    else:
+        print(f"\n❌ Script failed: {result['message']}")
